@@ -1,99 +1,56 @@
 import pandas as pd
 import matplotlib.pyplot as plt
-from prophet import Prophet
-import numpy as np
 
-# === Load & prepare training data ===
-df = pd.read_excel('Heat_Map_2025_05_21_to_2025_06_20.xlsx', sheet_name='EnergyConsumption').iloc[1:]
-df.columns = ['date', 'hour', 'energy']
-df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['hour'].astype(str))
-df['energy'] = pd.to_numeric(df['energy'], errors='coerce')
-df.dropna(subset=['datetime', 'energy'], inplace=True)
-df = df[df['datetime'] < '2025-06-19']
+# === Load forecast ===
+forecast_df = pd.read_excel('Forestcast_28.xlsx')
+forecast_df['datetime'] = pd.to_datetime(forecast_df['datetime'])
 
-# Feature engineering
-df['hour_num'] = df['datetime'].dt.hour
-df['day_of_week'] = df['datetime'].dt.dayofweek
-df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-hour_dummies = pd.get_dummies(df['hour_num'], prefix='hour')
-dow_dummies = pd.get_dummies(df['day_of_week'], prefix='dow')
-df_prophet = pd.concat([df[['datetime', 'energy', 'is_weekend']], hour_dummies, dow_dummies], axis=1)
-df_prophet.rename(columns={'datetime': 'ds', 'energy': 'y'}, inplace=True)
+# === Load actual ===
+actual_df = pd.read_excel('Heat_Map_2025_06_28_to_2025_06_28.xlsx', sheet_name='EnergyConsumption').iloc[1:]
+actual_df.columns = ['date', 'hour', 'energy']
+actual_df['datetime'] = pd.to_datetime(actual_df['date'].astype(str) + ' ' + actual_df['hour'].astype(str))
+actual_df.rename(columns={'energy': 'actual_energy_kVAh'}, inplace=True)
+actual_df = actual_df[['datetime', 'actual_energy_kVAh']]
 
-# Model
-model = Prophet(daily_seasonality=False, weekly_seasonality=False, changepoint_prior_scale=0.3)
-model.add_regressor('is_weekend')
-for col in hour_dummies.columns:
-    model.add_regressor(col)
-for col in dow_dummies.columns:
-    model.add_regressor(col)
-model.fit(df_prophet)
-
-# Forecast
-future = model.make_future_dataframe(periods=6 * 24, freq='H')
-future['hour_num'] = future['ds'].dt.hour
-future['day_of_week'] = future['ds'].dt.dayofweek
-future['is_weekend'] = future['day_of_week'].isin([5, 6]).astype(int)
-hour_dummies_future = pd.get_dummies(future['hour_num'], prefix='hour')
-dow_dummies_future = pd.get_dummies(future['day_of_week'], prefix='dow')
-
-# Align columns
-for col in hour_dummies.columns:
-    if col not in hour_dummies_future:
-        hour_dummies_future[col] = 0
-hour_dummies_future = hour_dummies_future[hour_dummies.columns]
-
-for col in dow_dummies.columns:
-    if col not in dow_dummies_future:
-        dow_dummies_future[col] = 0
-dow_dummies_future = dow_dummies_future[dow_dummies.columns]
-
-future = pd.concat([future, hour_dummies_future, dow_dummies_future], axis=1)
-forecast = model.predict(future)
-
-# Filter forecast
-forecast_df = forecast[(forecast['ds'] >= '2025-06-19') & (forecast['ds'] < '2025-06-25')].copy()
-forecast_df = forecast_df[['ds', 'yhat']]
-forecast_df.columns = ['datetime', 'predicted_energy_kVAh']
-forecast_df['hour'] = forecast_df['datetime'].dt.strftime('%H:%M')
-forecast_df['date'] = forecast_df['datetime'].dt.date
-
-# === Save forecast ===
-forecast_df.to_excel(r'C:\Users\IITMRP\PowerPrediction\forecast_june19to24_enhanced.xlsx', index=False)
-
-# === Load actual values ===
-actual_df = pd.read_excel(r'C:\Users\IITMRP\PowerPrediction\actual_19to24.xlsx')
-actual_df['datetime'] = pd.to_datetime(actual_df['datetime'])
-
-# === Merge and calculate errors ===
+# === Merge forecast and actual ===
 merged = pd.merge(forecast_df, actual_df, on='datetime', how='inner')
-merged.rename(columns={'actual_energy': 'actual_energy_kVAh'}, inplace=True)
+
+# === Errors ===
 merged['abs_error'] = abs(merged['predicted_energy_kVAh'] - merged['actual_energy_kVAh'])
 merged['abs_perc_error'] = (merged['abs_error'] / merged['actual_energy_kVAh']) * 100
+
+# === New percentage column ===
+merged['percentage'] = 100 - merged['abs_perc_error']
 
 # === Metrics ===
 mae = merged['abs_error'].mean()
 mape = merged['abs_perc_error'].mean()
+accuracy = 100 - mape
+
+print(f"MAE = {mae:.2f} kVAh")
+print(f"MAPE = {mape:.2f}%")
+print(f"Accuracy = {accuracy:.2f}%")
+
+# === Save results to Excel ===
+output_file = r"C:\Users\HP\PowerPrediction\Accuracy_June28.xlsx"
+merged.to_excel(output_file, index=False, engine="openpyxl")
+print(f"✅ Accuracy report saved to {output_file}")
 
 # === Plot ===
-plt.figure(figsize=(15, 7))
-for date in merged['date'].unique():
-    subset = merged[merged['date'] == date]
-    plt.plot(subset['hour'], subset['predicted_energy_kVAh'], marker='o', label=str(date))
-    for x, y, err in zip(subset['hour'], subset['predicted_energy_kVAh'], subset['abs_perc_error']):
-        plt.text(x, y + 1, f"{err:.1f}%", ha='center', fontsize=8, color='crimson')
+plt.figure(figsize=(15, 6))
+plt.plot(merged['datetime'], merged['predicted_energy_kVAh'], marker='o', label='Forecasted')
+plt.plot(merged['datetime'], merged['actual_energy_kVAh'], marker='x', label='Actual')
 
-plt.title("Forecasted vs Actual Hourly Energy (June 19–24)\nInaccuracy Shown Above Each Point", fontsize=14)
-plt.xlabel("Hour of Day")
-plt.ylabel("Predicted Energy (kVAh)")
+# Annotate each point with percentage accuracy
+for x, y, perc in zip(merged['datetime'], merged['predicted_energy_kVAh'], merged['percentage']):
+    plt.text(x, y + 1, f"{perc:.1f}%", ha='center', fontsize=8, color='green')
+
+plt.title(f"Forecast vs Actual Energy (June 28, 2025)\n"
+          f"MAE={mae:.2f} kVAh | MAPE={mape:.2f}% | Accuracy={accuracy:.2f}%", fontsize=14)
+plt.xlabel("Hour")
+plt.ylabel("Energy (kVAh)")
 plt.xticks(rotation=45)
+plt.legend()
 plt.grid(True, linestyle='--', alpha=0.5)
-plt.legend(title="Date", loc='upper right')
-
-# === Annotate MAE + MAPE ===
-plt.text(0.01, 0.95, f"MAE = {mae:.2f} kVAh\nMAPE = {mape:.2f}%", 
-         transform=plt.gca().transAxes, fontsize=12, color='black',
-         bbox=dict(facecolor='lightyellow', edgecolor='gray', boxstyle='round,pad=0.5'))
-
 plt.tight_layout()
 plt.show()
